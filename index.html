@@ -1,0 +1,137 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Draft Dashboard</title>
+<link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+<header class="topbar">
+  <div class="brand">
+    <span class="brand-mark" aria-hidden="true">FF</span>
+    <h1>Draft Dashboard</h1>
+  </div>
+
+  <div class="topbar-controls">
+    <label class="file-btn">
+      <input type="file" id="csvInput" accept=".csv" hidden />
+      Load CSV
+    </label>
+    <button id="loadSampleBtn" class="btn btn-ghost" type="button">Load sample</button>
+    <button id="undoBtn" class="btn btn-ghost" type="button" disabled>Undo last pick</button>
+    <button id="resetBtn" class="btn btn-ghost btn-danger" type="button">Reset draft</button>
+    <button id="themeToggle" class="btn btn-icon" type="button" aria-label="Toggle dark mode" title="Toggle dark mode">◐</button>
+  </div>
+</header>
+
+<div id="toast" class="toast" role="status" aria-live="polite"></div>
+
+<main class="layout">
+  <aside class="sidebar sidebar-left">
+
+    <section class="panel" id="clockPanel">
+      <h2>On the clock</h2>
+      <div class="clock-grid">
+        <div class="clock-stat">
+          <span class="clock-value" id="pickCount">0</span>
+          <span class="clock-label">Picks made</span>
+        </div>
+        <div class="clock-stat">
+          <span class="clock-value" id="roundPick">R1 · P1</span>
+          <span class="clock-label">Round · Pick</span>
+        </div>
+        <div class="clock-stat">
+          <span class="clock-value" id="picksUntilMe">–</span>
+          <span class="clock-label">Picks until you</span>
+        </div>
+      </div>
+    </section>
+
+    <section class="panel" id="settingsPanel">
+      <button class="panel-toggle" id="settingsToggle" type="button" aria-expanded="false">
+        <h2>League settings</h2><span class="chevron">▾</span>
+      </button>
+      <div class="panel-body" id="settingsBody" hidden>
+        <div class="field-row">
+          <label>Teams
+            <input type="number" id="cfgTeams" min="2" max="32" value="12" />
+          </label>
+          <label>Your pick #
+            <input type="number" id="cfgSlot" min="1" max="32" value="1" />
+          </label>
+        </div>
+        <p class="hint">Roster slots</p>
+        <div class="field-grid" id="rosterCfg">
+          <label>QB <input type="number" min="0" max="4" value="1" data-slot="QB" /></label>
+          <label>RB <input type="number" min="0" max="6" value="2" data-slot="RB" /></label>
+          <label>WR <input type="number" min="0" max="6" value="2" data-slot="WR" /></label>
+          <label>TE <input type="number" min="0" max="4" value="1" data-slot="TE" /></label>
+          <label>FLEX <input type="number" min="0" max="4" value="1" data-slot="FLEX" /></label>
+          <label>K <input type="number" min="0" max="2" value="1" data-slot="K" /></label>
+          <label>DST <input type="number" min="0" max="2" value="1" data-slot="DST" /></label>
+          <label>Bench <input type="number" min="0" max="10" value="6" data-slot="BENCH" /></label>
+        </div>
+        <button id="applySettings" class="btn btn-primary" type="button">Apply</button>
+      </div>
+    </section>
+
+    <section class="panel" id="bestAvailPanel">
+      <h2>Best available</h2>
+      <div id="bestAvailable" class="best-avail-list"></div>
+    </section>
+
+    <section class="panel" id="posCountPanel">
+      <h2>Remaining by position</h2>
+      <div id="posCounts" class="pos-counts"></div>
+    </section>
+  </aside>
+
+  <section class="table-panel">
+    <div class="filter-bar">
+      <input type="search" id="searchBox" placeholder="Search name or team…" aria-label="Search players" />
+      <div class="pos-tabs" id="posTabs" role="tablist" aria-label="Filter by position"></div>
+      <label class="hide-drafted">
+        <input type="checkbox" id="hideDraftedToggle" />
+        Hide drafted
+      </label>
+    </div>
+
+    <div class="table-wrap">
+      <table id="playersTable">
+        <thead>
+          <tr>
+            <th></th>
+            <th data-sort="rank" class="sortable">Rank</th>
+            <th data-sort="name" class="sortable">Player</th>
+            <th data-sort="pos" class="sortable">Pos</th>
+            <th data-sort="team" class="sortable">Team</th>
+            <th data-sort="bye" class="sortable">Bye</th>
+            <th data-sort="adp" class="sortable">vs ADP</th>
+            <th>Status</th>
+            <th></th>
+          </tr>
+        </thead>
+        <tbody id="playersBody"></tbody>
+      </table>
+      <p class="empty-state" id="emptyState">Load a CSV to get started — try "Load sample" or drop in your own rankings file.</p>
+    </div>
+  </section>
+
+  <aside class="sidebar sidebar-right">
+    <section class="panel" id="myTeamPanel">
+      <h2>My team</h2>
+      <div id="myTeam" class="roster-list"></div>
+    </section>
+
+    <section class="panel" id="queuePanel">
+      <h2>Queue</h2>
+      <div id="queueList" class="queue-list"></div>
+      <p class="hint" id="queueHint">Star players in the table to track them here.</p>
+    </section>
+  </aside>
+</main>
+
+<script src="app.js"></script>
+</body>
+</html>
