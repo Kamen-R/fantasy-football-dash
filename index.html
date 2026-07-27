@@ -61,6 +61,13 @@
             <input type="number" id="cfgSlot" min="1" max="32" value="1" />
           </label>
         </div>
+        <label>Tier sensitivity
+          <select id="cfgTierSensitivity">
+            <option value="tight">Tight (more tiers)</option>
+            <option value="medium" selected>Medium</option>
+            <option value="loose">Loose (fewer tiers)</option>
+          </select>
+        </label>
         <p class="hint">Roster slots</p>
         <div class="field-grid" id="rosterCfg">
           <label>QB <input type="number" min="0" max="4" value="1" data-slot="QB" /></label>
@@ -103,11 +110,13 @@
           <tr>
             <th></th>
             <th data-sort="rank" class="sortable">Rank</th>
+            <th data-sort="tier" class="sortable">Tier</th>
             <th data-sort="name" class="sortable">Player</th>
             <th data-sort="pos" class="sortable">Pos</th>
             <th data-sort="team" class="sortable">Team</th>
             <th data-sort="bye" class="sortable">Bye</th>
             <th data-sort="adp" class="sortable">vs ADP</th>
+            <th data-sort="volatility" class="sortable">Volatility</th>
             <th>Status</th>
             <th></th>
           </tr>

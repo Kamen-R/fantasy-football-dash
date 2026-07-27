@@ -16,7 +16,13 @@
     teams: 12,
     myPos: 1,
     slots: { QB: 1, RB: 2, WR: 2, TE: 1, FLEX: 1, K: 1, DST: 1, BENCH: 6 },
+    tierSensitivity: "medium",
   };
+
+  // Multipliers picked by sweeping against the sample rankings file: 1.0 was
+  // over-segmenting deep positions (23+ RB tiers), 1.75 lands close to what a
+  // real draft board shows (~6-12 tiers per position).
+  const TIER_SENSITIVITY = { tight: 1.0, medium: 1.75, loose: 2.5 };
 
   /** @type {{players: any[], byId: Map<string,any>, settings: any, queue: Set<string>, slotAssignments: Record<string,string>, lastAction: any, ui: any}} */
   const state = {
@@ -26,6 +32,7 @@
     queue: loadQueue(),
     slotAssignments: {},
     lastAction: null,
+    volatilityBands: null,
     ui: {
       search: "",
       posFilter: "ALL",
@@ -183,6 +190,15 @@
         .map(({ idx, label }) => ({ label, value: row[idx] }))
         .filter((e) => e.value !== undefined && e.value !== "");
 
+      // Volatility sources: any non-main-rank column whose header names it as a
+      // rank (contains "rank", case-insensitive). Excludes the aggregate/main
+      // rank column (that's a derived average, not an independent opinion) and
+      // excludes ADP (its header doesn't contain "rank").
+      const rankSources = extra
+        .filter((e) => /rank/i.test(e.label))
+        .map((e) => ({ label: e.label, value: parseFloat(e.value) }))
+        .filter((e) => Number.isFinite(e.value));
+
       let id = `${name}|${team}|${pos}`.toLowerCase().trim();
       if (seenIds.has(id)) {
         const n = seenIds.get(id) + 1;
@@ -203,6 +219,9 @@
         adp: parseAdp(adpRaw),
         notes: (notes || "").trim(),
         extra,
+        rankSources,
+        volatility: null,
+        tier: null,
         status: "available",
         pick: null,
         slot: null,
@@ -210,6 +229,52 @@
     }
     players.sort((a, b) => a.rank - b.rank);
     return players;
+  }
+
+  // ---------- tiers & volatility ----------
+
+  function computeTiers(players) {
+    const mult = TIER_SENSITIVITY[state.settings.tierSensitivity] ?? TIER_SENSITIVITY.medium;
+    for (const p of players) p.tier = null;
+    for (const pos of POS_LIST) {
+      const list = players.filter((p) => p.pos === pos).sort((a, b) => a.rank - b.rank);
+      if (!list.length) continue;
+      list[0].tier = 1;
+      if (list.length === 1) continue;
+
+      const gaps = [];
+      for (let i = 1; i < list.length; i++) gaps.push(list[i].rank - list[i - 1].rank);
+      const meanGap = gaps.reduce((a, b) => a + b, 0) / gaps.length;
+      const variance = gaps.reduce((a, b) => a + (b - meanGap) ** 2, 0) / gaps.length;
+      const stdGap = Math.sqrt(variance);
+      const threshold = meanGap + mult * stdGap;
+
+      let tier = 1;
+      for (let i = 1; i < list.length; i++) {
+        if (gaps[i - 1] > threshold && gaps[i - 1] > 0) tier++;
+        list[i].tier = tier;
+      }
+    }
+  }
+
+  function percentile(sortedArr, p) {
+    const idx = Math.min(sortedArr.length - 1, Math.floor(p * sortedArr.length));
+    return sortedArr[idx];
+  }
+
+  function computeVolatility(players) {
+    for (const p of players) {
+      const vals = p.rankSources.map((r) => r.value);
+      if (vals.length >= 2) {
+        const mean = vals.reduce((a, b) => a + b, 0) / vals.length;
+        const variance = vals.reduce((a, b) => a + (b - mean) ** 2, 0) / vals.length;
+        p.volatility = Math.sqrt(variance);
+      } else {
+        p.volatility = null;
+      }
+    }
+    const values = players.map((p) => p.volatility).filter((v) => v !== null).sort((a, b) => a - b);
+    state.volatilityBands = values.length ? { low: percentile(values, 0.33), high: percentile(values, 0.67) } : null;
   }
 
   function parseAdp(raw) {
@@ -237,6 +302,8 @@
     state.byId = new Map(players.map((p) => [p.id, p]));
     state.slotAssignments = {};
     state.lastAction = null;
+    computeTiers(state.players);
+    computeVolatility(state.players);
 
     if (resetDraft) {
       localStorage.removeItem(LS_KEYS.status);
@@ -395,6 +462,10 @@
           return parseFloat(p.bye) || 999;
         case "adp":
           return p.adp === null ? 999 : p.adp;
+        case "tier":
+          return p.tier === null ? 999 : p.tier;
+        case "volatility":
+          return p.volatility === null ? 999 : p.volatility;
         default:
           return p.rank;
       }
@@ -429,19 +500,48 @@
     return `<span class="adp-delta neutral">even</span>`;
   }
 
+  function tierBadge(p) {
+    if (!p.tier) return `<span class="tier-chip neutral">—</span>`;
+    return `<span class="tier-chip">T${p.tier}</span>`;
+  }
+
+  function volatilityBadge(p) {
+    if (p.volatility === null) return `<span class="volatility-badge neutral" title="Not enough expert-rank sources for this player">—</span>`;
+    const bands = state.volatilityBands;
+    let label = "Mixed";
+    let cls = "mixed";
+    if (bands) {
+      if (p.volatility <= bands.low) {
+        label = "Steady";
+        cls = "steady";
+      } else if (p.volatility >= bands.high) {
+        label = "Volatile";
+        cls = "volatile";
+      }
+    }
+    const sourceText = p.rankSources.map((r) => `${r.label}: ${r.value}`).join(", ");
+    return `<span class="volatility-badge ${cls}" title="Spread across ${p.rankSources.length} sources (${sourceText})">${label} · ${p.volatility.toFixed(1)}</span>`;
+  }
+
   function renderTable() {
     const tbody = document.getElementById("playersBody");
     const players = filteredSortedPlayers();
     document.getElementById("emptyState").style.display = state.players.length ? "none" : "block";
 
     if (!players.length && state.players.length) {
-      tbody.innerHTML = `<tr><td colspan="9" style="padding:24px;text-align:center;color:var(--text-muted)">No players match your filters.</td></tr>`;
+      tbody.innerHTML = `<tr><td colspan="11" style="padding:24px;text-align:center;color:var(--text-muted)">No players match your filters.</td></tr>`;
       updateSortHeaders();
       return;
     }
 
     const frag = document.createDocumentFragment();
+    const lastTierByPos = {};
     for (const p of players) {
+      if (p.tier !== null && lastTierByPos[p.pos] !== undefined && lastTierByPos[p.pos] !== p.tier) {
+        frag.appendChild(buildTierDividerRow(p));
+      }
+      if (p.tier !== null) lastTierByPos[p.pos] = p.tier;
+
       const tr = document.createElement("tr");
       tr.className = "player-row" + (p.status === "me" ? " drafted-me" : p.status === "other" ? " drafted-other" : "");
       tr.dataset.id = p.id;
@@ -452,11 +552,13 @@
       tr.innerHTML = `
         <td><button class="star-btn ${starred ? "active" : ""}" data-action="star" title="Queue">${starred ? "★" : "☆"}</button></td>
         <td>${Number.isFinite(p.rank) ? p.rank : ""}</td>
+        <td>${tierBadge(p)}</td>
         <td class="name-cell">${escapeHtml(p.name)}</td>
         <td><span class="pos-badge"><span class="pos-dot ${p.pos}"></span>${p.pos}</span></td>
         <td>${p.team}</td>
         <td>${p.bye || "—"}</td>
         <td>${adpBadge(p)}</td>
+        <td>${volatilityBadge(p)}</td>
         <td>${statusPill(p)}</td>
         <td class="row-actions">${rowActions(p, isAvailable)}</td>
       `;
@@ -469,6 +571,13 @@
     tbody.innerHTML = "";
     tbody.appendChild(frag);
     updateSortHeaders();
+  }
+
+  function buildTierDividerRow(p) {
+    const tr = document.createElement("tr");
+    tr.className = "tier-divider-row";
+    tr.innerHTML = `<td colspan="11"><span class="tier-divider"><span class="pos-dot ${p.pos}"></span>${p.pos} · Tier ${p.tier}</span></td>`;
+    return tr;
   }
 
   function statusPill(p) {
@@ -496,7 +605,7 @@
       .join("");
     const sos = p.sos ? `<div class="detail-item"><strong>${escapeHtml(p.sos)}</strong>SOS</div>` : "";
     tr.innerHTML = `
-      <td colspan="9">
+      <td colspan="11">
         <div class="detail-grid">${sos}${extras}</div>
         ${p.notes ? `<div class="detail-notes">${escapeHtml(p.notes)}</div>` : ""}
       </td>
@@ -656,10 +765,12 @@
   function applySettingsFromForm() {
     state.settings.teams = parseInt(document.getElementById("cfgTeams").value, 10) || 12;
     state.settings.myPos = parseInt(document.getElementById("cfgSlot").value, 10) || 1;
+    state.settings.tierSensitivity = document.getElementById("cfgTierSensitivity").value;
     document.querySelectorAll("#rosterCfg input[data-slot]").forEach((input) => {
       state.settings.slots[input.dataset.slot] = parseInt(input.value, 10) || 0;
     });
     saveSettings();
+    if (state.players.length) computeTiers(state.players);
     renderAll();
     toast("Settings applied.");
   }
@@ -667,6 +778,7 @@
   function populateSettingsForm() {
     document.getElementById("cfgTeams").value = state.settings.teams;
     document.getElementById("cfgSlot").value = state.settings.myPos;
+    document.getElementById("cfgTierSensitivity").value = state.settings.tierSensitivity;
     document.querySelectorAll("#rosterCfg input[data-slot]").forEach((input) => {
       input.value = state.settings.slots[input.dataset.slot] ?? 0;
     });
