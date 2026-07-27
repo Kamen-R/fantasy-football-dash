@@ -346,6 +346,27 @@ tbody tr.player-row.drafted-other .name-cell { text-decoration: line-through; }
 .adp-delta.reach { color: var(--critical); }
 .adp-delta.neutral { color: var(--text-muted); }
 
+.tier-chip { font-variant-numeric: tabular-nums; font-weight: 700; font-size: 11px; color: var(--text-secondary); }
+.tier-chip.neutral { color: var(--text-muted); font-weight: 400; }
+
+.volatility-badge { font-size: 11px; font-weight: 600; white-space: nowrap; }
+.volatility-badge.steady { color: var(--good); }
+.volatility-badge.volatile { color: var(--critical); }
+.volatility-badge.mixed { color: var(--text-secondary); }
+.volatility-badge.neutral { color: var(--text-muted); font-weight: 400; }
+
+.tier-divider-row td { padding: 5px 10px; background: var(--page); border-bottom: 1px solid var(--gridline); }
+.tier-divider {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--text-secondary);
+}
+
 .status-pill { font-size: 11px; padding: 2px 8px; border-radius: 999px; border: 1px solid var(--border); color: var(--text-secondary); }
 .status-pill.me { background: var(--accent); color: #fff; border-color: transparent; }
 
