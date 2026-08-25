@@ -6,6 +6,12 @@
   const FLEX_ELIGIBLE = ["RB", "WR", "TE"];
   const TOP_OFFENSE_CUTOFF = 10;
   const BOTTOM_OFFENSE_CUTOFF = 27; // rank >= this is bottom 6 of 32
+
+  // ADP sources are external overlay data — independent of whichever player
+  // CSV is loaded, joined onto it by name at render time. Add more entries
+  // here (e.g. an ESPN-league ADP file) to extend the picker; the dropdown in
+  // Settings is built from this list.
+  const ADP_SOURCES = [{ key: "underdog", label: "Underdog (Best Ball)", file: "adp_underdog.csv" }];
   const LS_KEYS = {
     csv: "ffdraft_csv_text",
     status: "ffdraft_status",
@@ -19,17 +25,20 @@
     myPos: 1,
     slots: { QB: 1, RB: 2, WR: 2, TE: 1, FLEX: 1, K: 1, DST: 1, BENCH: 6 },
     tierSensitivity: "medium",
+    adpSource: ADP_SOURCES[0].key,
   };
 
   // Two independent multiplier sets, because points gaps and rank gaps are
-  // shaped nothing alike: rank gaps are roughly uniform small integers, while
-  // points gaps are steep at the top of a position (a couple of true outliers)
-  // and flat for most of the pool. Both were picked by sweeping against real
-  // sample data until tier counts looked like a usable draft board (~4-16
-  // tiers per position) rather than 1 giant tier or 30 singleton ones.
+  // shaped nothing alike, and the projection set is bigger than a naive
+  // points-only sweep would suggest: gaps are measured in points but the
+  // walk order is rank (see tierByGap), which is noisier than a clean
+  // points-sorted walk since rank and points don't perfectly agree. Both
+  // sets were picked by sweeping against real sample data until tier counts
+  // looked like a usable draft board (~4-16 tiers per position) rather than
+  // 1 giant tier or 30 singleton ones.
   const TIER_SENSITIVITY = {
     rank: { tight: 1.0, medium: 1.75, loose: 2.5 },
-    projection: { tight: 0.25, medium: 0.5, loose: 1.25 },
+    projection: { tight: 0.75, medium: 1.0, loose: 1.5 },
   };
 
   // A position needs at least this many players with a projection value
@@ -51,6 +60,8 @@
     injuryRiskQ3: null,
     tierMethodByPos: {},
     offenseRankByTeam: {},
+    adpByKey: {},
+    adpByNameOnly: {},
     ui: {
       search: "",
       posFilter: "ALL",
@@ -269,18 +280,24 @@
 
   // ---------- tiers & volatility ----------
 
-  // Assigns ascending tier numbers to `list` in place, breaking to a new tier
-  // wherever the gap between consecutive `valueFn` results is a statistical
-  // outlier relative to that list's own gaps (mean + mult*stddev). Shared by
-  // both the points-based and rank-based tiering paths below — same
-  // procedure, different input value and multiplier scale.
-  function tierByGap(list, valueFn, mult) {
-    list.sort((a, b) => valueFn(a) - valueFn(b));
+  // Assigns ascending tier numbers to `list` in place. Always walks the list
+  // in `orderFn` order (ascending — best first) and breaks to a new tier
+  // wherever the gap between consecutive `gapFn` results is a statistical
+  // outlier relative to that list's own gaps (mean + mult*stddev). `gapFn`
+  // must be oriented so a higher value is better, same direction as `orderFn`
+  // ascending — that's what guarantees tier numbers can only stay the same or
+  // climb as `orderFn` gets worse, never drop. When `orderFn` and `gapFn`
+  // measure the same thing (the rank-fallback path) this is the plain
+  // rank-gap method; when they differ (rank order, points-sized gaps) it's
+  // what keeps tiers from ever ranking a worse-ranked player ahead of a
+  // better-ranked one, even though the gap sizes come from a different source.
+  function tierByGap(list, orderFn, gapFn, mult) {
+    list.sort((a, b) => orderFn(a) - orderFn(b));
     list[0].tier = 1;
     if (list.length === 1) return;
 
     const gaps = [];
-    for (let i = 1; i < list.length; i++) gaps.push(valueFn(list[i]) - valueFn(list[i - 1]));
+    for (let i = 1; i < list.length; i++) gaps.push(gapFn(list[i - 1]) - gapFn(list[i]));
     const meanGap = gaps.reduce((a, b) => a + b, 0) / gaps.length;
     const variance = gaps.reduce((a, b) => a + (b - meanGap) ** 2, 0) / gaps.length;
     const stdGap = Math.sqrt(variance);
@@ -305,12 +322,13 @@
 
       const withProjection = posPlayers.filter((p) => p.projection !== null);
       if (withProjection.length >= MIN_PROJECTION_SAMPLE) {
-        // Higher points is better, so sort/gap on the negated value to reuse
-        // the same ascending-gap logic as the rank path.
-        tierByGap(withProjection, (p) => -p.projection, projMult);
+        // Order by rank (never points) so a worse-ranked player can never
+        // land in a better tier than one ranked ahead of them — projected
+        // points only decide where the breaks fall, not who's compared first.
+        tierByGap(withProjection, (p) => p.rank, (p) => p.projection, projMult);
         state.tierMethodByPos[pos] = "projection";
       } else {
-        tierByGap(posPlayers, (p) => p.rank, rankMult);
+        tierByGap(posPlayers, (p) => p.rank, (p) => -p.rank, rankMult);
         state.tierMethodByPos[pos] = "rank";
       }
     }
@@ -379,6 +397,87 @@
     } catch {
       // Offense data is optional flavor, not core functionality — fail quiet.
     }
+  }
+
+  // Normalizes a player name for cross-source matching: strips accents,
+  // periods/apostrophes, common suffixes (Jr/Sr/II-V), and collapses
+  // whitespace. Doesn't resolve nicknames (e.g. "Cam" vs "Cameron") — that's
+  // a genuinely hard, error-prone problem to generalize (risks silent wrong
+  // matches), so those fall through to the CSV's own ADP column instead.
+  function normalizeName(name) {
+    return String(name)
+      .toLowerCase()
+      .normalize("NFD")
+      .replace(/[̀-ͯ]/g, "")
+      .replace(/[.']/g, "")
+      .replace(/\b(jr|sr|ii|iii|iv|v)\b/g, "")
+      .replace(/[^a-z0-9\s]/g, " ")
+      .replace(/\s+/g, " ")
+      .trim();
+  }
+
+  // ADP is external overlay data, independent of whichever player CSV is
+  // loaded — fetched once (or whenever the source picker changes) and joined
+  // onto players by name at render time rather than baked into player objects.
+  async function loadAdpSource(sourceKey) {
+    const source = ADP_SOURCES.find((s) => s.key === sourceKey) || ADP_SOURCES[0];
+    try {
+      const res = await fetch(source.file);
+      if (!res.ok) throw new Error("not found");
+      const text = await res.text();
+      const rows = parseCsv(text);
+      const header = rows[0].map((h) => h.trim().toLowerCase());
+      const nameIdx = header.indexOf("name");
+      const posIdx = header.indexOf("pos");
+      const adpIdx = header.indexOf("adp");
+      if (nameIdx === -1 || adpIdx === -1) return;
+
+      const byKey = {};
+      const byNameOnly = {};
+      for (const row of rows.slice(1)) {
+        const adp = parseFloat(row[adpIdx]);
+        if (!Number.isFinite(adp)) continue;
+        const nn = normalizeName(row[nameIdx] || "");
+        if (!nn) continue;
+        const pos = (row[posIdx] || "").trim().toUpperCase();
+        byKey[`${nn}|${pos}`] = adp;
+        if (!(nn in byNameOnly)) byNameOnly[nn] = adp;
+      }
+      state.adpByKey = byKey;
+      state.adpByNameOnly = byNameOnly;
+      renderTable();
+      renderMyTeam();
+    } catch {
+      // ADP overlay is optional — fail quiet, badges fall back to the CSV's
+      // own column (if any).
+    }
+  }
+
+  // Looks up a player's ADP in the currently loaded external source. Tries
+  // name+position first (handles duplicate names across positions), then
+  // falls back to name-only. Returns null if no match — callers fall back to
+  // the CSV's own ADP-delta column at that point.
+  function lookupExternalAdp(p) {
+    const nn = normalizeName(p.name);
+    if (!nn) return null;
+    const byKey = state.adpByKey[`${nn}|${p.pos}`];
+    if (byKey !== undefined) return byKey;
+    const byName = state.adpByNameOnly[nn];
+    return byName !== undefined ? byName : null;
+  }
+
+  // The vs-ADP number and its source, preferring a fresh delta computed from
+  // this player's own rank against the matched external ADP over whatever
+  // pre-computed delta the CSV itself shipped with (if any).
+  function adpInfo(p) {
+    const externalAdp = lookupExternalAdp(p);
+    if (externalAdp !== null) {
+      return { delta: p.rank - externalAdp, source: "external", rawAdp: externalAdp };
+    }
+    if (p.adp !== null) {
+      return { delta: p.adp, source: "file", rawAdp: null };
+    }
+    return { delta: null, source: null, rawAdp: null };
   }
 
   function loadFromCsvText(text, { resetDraft } = { resetDraft: false }) {
@@ -571,8 +670,10 @@
           return p.team;
         case "bye":
           return parseFloat(p.bye) || 999;
-        case "adp":
-          return p.adp === null ? 999 : p.adp;
+        case "adp": {
+          const delta = adpInfo(p).delta;
+          return delta === null ? 999 : delta;
+        }
         case "tier":
           return p.tier === null ? 999 : p.tier;
         case "volatility":
@@ -608,10 +709,13 @@
   }
 
   function adpBadge(p) {
-    if (p.adp === null || Number.isNaN(p.adp)) return `<span class="adp-delta neutral">—</span>`;
-    if (p.adp < 0) return `<span class="adp-delta value" title="Ranked ahead of ADP — potential value">${p.adp} value</span>`;
-    if (p.adp > 0) return `<span class="adp-delta reach" title="Ranked behind ADP — potential reach">+${p.adp} reach</span>`;
-    return `<span class="adp-delta neutral">even</span>`;
+    const { delta, source, rawAdp } = adpInfo(p);
+    if (delta === null || Number.isNaN(delta)) return `<span class="adp-delta neutral">—</span>`;
+    const rounded = Math.round(delta);
+    const sourceNote = source === "external" ? ` (rank ${p.rank} vs ${ADP_SOURCES.find((s) => s.key === state.settings.adpSource)?.label} ADP ${rawAdp})` : " (from this file's own ADP column)";
+    if (rounded < 0) return `<span class="adp-delta value" title="Ranked ahead of ADP — potential value${sourceNote}">${rounded} value</span>`;
+    if (rounded > 0) return `<span class="adp-delta reach" title="Ranked behind ADP — potential reach${sourceNote}">+${rounded} reach</span>`;
+    return `<span class="adp-delta neutral" title="Ranked right at ADP${sourceNote}">even</span>`;
   }
 
   function tierBadge(p) {
@@ -679,14 +783,17 @@
     // Tiers are computed on rank OR projected points depending on position,
     // but the table can be sorted by any column — so tier numbers don't
     // necessarily climb monotonically in display order (a lower-ranked player
-    // can have a better points tier). Track the deepest tier seen per position
-    // rather than just the last one, so re-encountering an earlier tier out of
-    // order never fires a duplicate/backward divider.
-    const maxTierSeenByPos = {};
+    // can have a better points tier, e.g. Puka Nacua sitting in a better tier
+    // than the higher-ranked Ja'Marr Chase). Track which tiers have already
+    // been shown per position (not just the running max) so every tier gets
+    // exactly one divider — never duplicated, and never silently skipped just
+    // because a later tier happened to be encountered first in this sort order.
+    const shownTiersByPos = {};
     for (const p of players) {
-      if (p.tier !== null && p.tier > (maxTierSeenByPos[p.pos] ?? 0)) {
+      const shown = shownTiersByPos[p.pos] ?? (shownTiersByPos[p.pos] = new Set());
+      if (p.tier !== null && !shown.has(p.tier)) {
         frag.appendChild(buildTierDividerRow(p));
-        maxTierSeenByPos[p.pos] = p.tier;
+        shown.add(p.tier);
       }
 
       const tr = document.createElement("tr");
@@ -752,9 +859,12 @@
       .map((e) => `<div class="detail-item"><strong>${escapeHtml(String(e.value))}</strong>${escapeHtml(e.label)}</div>`)
       .join("");
     const sos = p.sos ? `<div class="detail-item"><strong>${escapeHtml(p.sos)}</strong>SOS</div>` : "";
+    const { source: adpSource, rawAdp } = adpInfo(p);
+    const adpSourceLabel = ADP_SOURCES.find((s) => s.key === state.settings.adpSource)?.label ?? "ADP";
+    const adpDetail = adpSource === "external" ? `<div class="detail-item"><strong>${rawAdp}</strong>${escapeHtml(adpSourceLabel)} ADP</div>` : "";
     tr.innerHTML = `
       <td colspan="11">
-        <div class="detail-grid">${sos}${extras}</div>
+        <div class="detail-grid">${sos}${adpDetail}${extras}</div>
         ${p.notes ? `<div class="detail-notes">${escapeHtml(p.notes)}</div>` : ""}
       </td>
     `;
@@ -914,11 +1024,15 @@
     state.settings.teams = parseInt(document.getElementById("cfgTeams").value, 10) || 12;
     state.settings.myPos = parseInt(document.getElementById("cfgSlot").value, 10) || 1;
     state.settings.tierSensitivity = document.getElementById("cfgTierSensitivity").value;
+    const newAdpSource = document.getElementById("cfgAdpSource").value;
+    const adpSourceChanged = newAdpSource !== state.settings.adpSource;
+    state.settings.adpSource = newAdpSource;
     document.querySelectorAll("#rosterCfg input[data-slot]").forEach((input) => {
       state.settings.slots[input.dataset.slot] = parseInt(input.value, 10) || 0;
     });
     saveSettings();
     if (state.players.length) computeTiers(state.players);
+    if (adpSourceChanged) loadAdpSource(state.settings.adpSource);
     renderAll();
     toast("Settings applied.");
   }
@@ -927,6 +1041,9 @@
     document.getElementById("cfgTeams").value = state.settings.teams;
     document.getElementById("cfgSlot").value = state.settings.myPos;
     document.getElementById("cfgTierSensitivity").value = state.settings.tierSensitivity;
+    const adpSelect = document.getElementById("cfgAdpSource");
+    adpSelect.innerHTML = ADP_SOURCES.map((s) => `<option value="${s.key}">${escapeHtml(s.label)}</option>`).join("");
+    adpSelect.value = state.settings.adpSource;
     document.querySelectorAll("#rosterCfg input[data-slot]").forEach((input) => {
       input.value = state.settings.slots[input.dataset.slot] ?? 0;
     });
@@ -936,6 +1053,7 @@
     populateSettingsForm();
     renderPosTabs();
     loadOffenseRankings();
+    loadAdpSource(state.settings.adpSource);
 
     document.getElementById("csvInput").addEventListener("change", (e) => {
       const file = e.target.files[0];
