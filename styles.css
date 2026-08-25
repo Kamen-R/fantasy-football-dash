@@ -254,6 +254,14 @@ input[type="number"], input[type="search"], input[type="text"] {
 .pos-count-item { display: flex; align-items: center; gap: 6px; font-size: 12px; }
 .pos-count-item .num { font-weight: 700; font-variant-numeric: tabular-nums; }
 
+.strategy-list { display: flex; flex-direction: column; gap: 4px; }
+.strategy-row { display: flex; align-items: center; gap: 8px; font-size: 12px; padding: 4px 6px; border-radius: 6px; cursor: help; }
+.strategy-row .strategy-icon { width: 14px; flex-shrink: 0; text-align: center; font-weight: 700; }
+.strategy-row.available { color: var(--text-secondary); }
+.strategy-row.available .strategy-icon { color: var(--text-muted); }
+.strategy-row.achieved { color: var(--good); font-weight: 600; }
+.strategy-row.eliminated { color: var(--text-muted); text-decoration: line-through; opacity: 0.6; }
+
 .pos-dot {
   width: 8px; height: 8px;
   border-radius: 50%;
