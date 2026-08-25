@@ -45,6 +45,7 @@
     slotAssignments: {},
     actionHistory: [],
     volatilityBands: null,
+    injuryRiskQ3: null,
     tierMethodByPos: {},
     ui: {
       search: "",
@@ -168,6 +169,7 @@
     const adpIdx = find([/adp/]);
     const notesIdx = find([/^notes?$/]);
     const rankIdx = find([/^agg_?rank$/, /^overall_?rank$/, /^rank$/, /^ecr$/, /rank/]);
+    const injuryIdx = find([/injury/]);
 
     // The points-projection column used for tiers. Priority 1: a "DS
     // Projection"-style column (this year's named source) — the "ds" check
@@ -188,7 +190,7 @@
       extra.push({ idx, label: h });
     });
 
-    return { nameIdx, posIdx, teamIdx, byeIdx, sosIdx, adpIdx, notesIdx, rankIdx, projIdx, extra };
+    return { nameIdx, posIdx, teamIdx, byeIdx, sosIdx, adpIdx, notesIdx, rankIdx, projIdx, injuryIdx, extra };
   }
 
   function buildPlayers(rows) {
@@ -211,6 +213,8 @@
       const rank = parseFloat(rankRaw);
       const projRaw = cols.projIdx !== -1 ? row[cols.projIdx] : "";
       const projection = parseFloat(projRaw);
+      const injuryRaw = cols.injuryIdx !== -1 ? row[cols.injuryIdx] : "";
+      const injuryRisk = parseFloat(String(injuryRaw).replace("%", ""));
 
       const extra = cols.extra
         .map(({ idx, label }) => ({ label, value: row[idx] }))
@@ -245,6 +249,7 @@
         adp: parseAdp(adpRaw),
         notes: (notes || "").trim(),
         projection: Number.isFinite(projection) ? projection : null,
+        injuryRisk: Number.isFinite(injuryRisk) ? injuryRisk : null,
         extra,
         rankSources,
         volatility: null,
@@ -327,6 +332,14 @@
     state.volatilityBands = values.length ? { low: percentile(values, 0.33), high: percentile(values, 0.67) } : null;
   }
 
+  // Flags the riskiest quarter of the pool: players whose reported injury
+  // risk is at or above the 75th percentile (i.e. the bottom quartile by
+  // health outlook, even though that's the top quartile of the raw percentage).
+  function computeInjuryRiskStats(players) {
+    const values = players.map((p) => p.injuryRisk).filter((v) => v !== null).sort((a, b) => a - b);
+    state.injuryRiskQ3 = values.length ? percentile(values, 0.75) : null;
+  }
+
   function parseAdp(raw) {
     if (raw === undefined || raw === null || raw === "") return null;
     const cleaned = String(raw).replace(/\+/g, "");
@@ -354,6 +367,7 @@
     state.actionHistory = [];
     computeTiers(state.players);
     computeVolatility(state.players);
+    computeInjuryRiskStats(state.players);
 
     if (resetDraft) {
       localStorage.removeItem(LS_KEYS.status);
@@ -593,6 +607,20 @@
     return `<span class="volatility-badge ${cls}" title="Spread across ${p.rankSources.length} sources (${sourceText})">${label} · ${p.volatility.toFixed(1)}</span>`;
   }
 
+  // Compact at-a-glance warning icons shown next to a player's name — in the
+  // main table and in the My Team roster — so risk is visible without having
+  // to scan over to the dedicated Volatility column or expand row detail.
+  function flagIcons(p) {
+    const icons = [];
+    if (p.injuryRisk !== null && state.injuryRiskQ3 !== null && p.injuryRisk >= state.injuryRiskQ3) {
+      icons.push(`<span class="flag-icon" title="High injury risk — reported at ${p.injuryRisk}%, in the riskiest quartile of rated players">🚑</span>`);
+    }
+    if (p.volatility !== null && state.volatilityBands && p.volatility >= state.volatilityBands.high) {
+      icons.push(`<span class="flag-icon" title="Highly volatile — expert ranks disagree widely on this player (σ=${p.volatility.toFixed(1)})">🎲</span>`);
+    }
+    return icons.length ? `<span class="flag-icons">${icons.join("")}</span>` : "";
+  }
+
   function renderTable() {
     const tbody = document.getElementById("playersBody");
     const players = filteredSortedPlayers();
@@ -629,7 +657,7 @@
         <td><button class="star-btn ${starred ? "active" : ""}" data-action="star" title="Queue">${starred ? "★" : "☆"}</button></td>
         <td>${Number.isFinite(p.rank) ? p.rank : ""}</td>
         <td>${tierBadge(p)}</td>
-        <td class="name-cell">${escapeHtml(p.name)}</td>
+        <td class="name-cell">${escapeHtml(p.name)}${flagIcons(p)}</td>
         <td><span class="pos-badge"><span class="pos-dot ${p.pos}"></span>${p.pos}</span></td>
         <td>${p.team}</td>
         <td>${p.bye || "—"}</td>
@@ -728,7 +756,7 @@
         return `
           <div class="roster-slot filled">
             <span class="slot-tag">${slot.type}</span>
-            <span class="slot-player">${escapeHtml(player.name)} <span class="name-sub">${player.pos}${player.team !== "—" ? " · " + player.team : ""}</span></span>
+            <span class="slot-player">${escapeHtml(player.name)}${flagIcons(player)} <span class="name-sub">${player.pos}${player.team !== "—" ? " · " + player.team : ""}</span></span>
             <button class="slot-remove" data-unassign="${slot.id}" title="Unassign">×</button>
           </div>`;
       }
@@ -750,7 +778,7 @@
         rows.push(`
           <div class="roster-slot filled">
             <span class="slot-tag">${p.pos}</span>
-            <span class="slot-player">${escapeHtml(p.name)}</span>
+            <span class="slot-player">${escapeHtml(p.name)}${flagIcons(p)}</span>
             <select data-manual-assign="${p.id}"><option value="">assign…</option>${options}</select>
           </div>`);
       }
