@@ -697,7 +697,7 @@
       const isAvailable = p.status === "available";
 
       tr.innerHTML = `
-        <td><button class="star-btn ${starred ? "active" : ""}" data-action="star" title="Queue">${starred ? "★" : "☆"}</button></td>
+        <td><button class="star-btn ${starred ? "active" : ""}" data-action="star" title="${starred ? "Remove from your queue" : "Add to your queue"}">${starred ? "★" : "☆"}</button></td>
         <td>${Number.isFinite(p.rank) ? p.rank : ""}</td>
         <td>${tierBadge(p)}</td>
         <td class="name-cell">${escapeHtml(p.name)}${flagIcons(p)}</td>
@@ -800,7 +800,7 @@
           <div class="roster-slot filled">
             <span class="slot-tag">${slot.type}</span>
             <span class="slot-player">${escapeHtml(player.name)}${flagIcons(player)} <span class="name-sub">${player.pos}${player.team !== "—" ? " · " + player.team : ""}</span></span>
-            <button class="slot-remove" data-unassign="${slot.id}" title="Unassign">×</button>
+            <button class="slot-remove" data-unassign="${slot.id}" title="Unassign from this roster slot">×</button>
           </div>`;
       }
       return `
@@ -843,7 +843,7 @@
           <span class="pos-dot ${p.pos}"></span>
           <span class="qname">${escapeHtml(p.name)}</span>
           <span class="name-sub">#${p.rank}</span>
-          <button class="qremove" data-unqueue="${p.id}" title="Remove">×</button>
+          <button class="qremove" data-unqueue="${p.id}" title="Remove from queue">×</button>
         </div>`;
       })
       .join("");
