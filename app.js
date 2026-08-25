@@ -24,14 +24,14 @@
   // real draft board shows (~6-12 tiers per position).
   const TIER_SENSITIVITY = { tight: 1.0, medium: 1.75, loose: 2.5 };
 
-  /** @type {{players: any[], byId: Map<string,any>, settings: any, queue: Set<string>, slotAssignments: Record<string,string>, lastAction: any, ui: any}} */
+  /** @type {{players: any[], byId: Map<string,any>, settings: any, queue: Set<string>, slotAssignments: Record<string,string>, actionHistory: {id:string}[], ui: any}} */
   const state = {
     players: [],
     byId: new Map(),
     settings: loadSettings(),
     queue: loadQueue(),
     slotAssignments: {},
-    lastAction: null,
+    actionHistory: [],
     volatilityBands: null,
     ui: {
       search: "",
@@ -301,7 +301,7 @@
     state.players = players;
     state.byId = new Map(players.map((p) => [p.id, p]));
     state.slotAssignments = {};
-    state.lastAction = null;
+    state.actionHistory = [];
     computeTiers(state.players);
     computeVolatility(state.players);
 
@@ -311,6 +311,7 @@
       saveQueue();
     } else {
       applySavedStatus();
+      rebuildActionHistory();
     }
 
     saveCsvText(text);
@@ -335,6 +336,13 @@
     } catch {
       /* ignore corrupt state */
     }
+  }
+
+  function rebuildActionHistory() {
+    state.actionHistory = state.players
+      .filter((p) => p.status !== "available" && p.pick != null)
+      .sort((a, b) => a.pick - b.pick)
+      .map((p) => ({ id: p.id }));
   }
 
   // ---------- roster slots ----------
@@ -389,18 +397,24 @@
     if (who === "me") {
       p.slot = assignSlot(p);
     }
-    state.lastAction = { id };
+    state.actionHistory.push({ id });
     persistAll();
     renderAll();
   }
 
-  function resetPlayer(id) {
+  // `fromUndo` skips re-filtering the history stack, since undoLast() already
+  // popped the entry it's unwinding; a manual per-row Reset click (fromUndo
+  // false) can target any drafted player, not just the most recent pick, so it
+  // has to scrub that player's entry out of the stack wherever it sits.
+  function resetPlayer(id, { fromUndo = false } = {}) {
     const p = state.byId.get(id);
     if (!p || p.status === "available") return;
     unassignSlot(p);
     p.status = "available";
     p.pick = null;
-    if (state.lastAction && state.lastAction.id === id) state.lastAction = null;
+    if (!fromUndo) {
+      state.actionHistory = state.actionHistory.filter((a) => a.id !== id);
+    }
     renumberPicks();
     persistAll();
     renderAll();
@@ -414,8 +428,9 @@
   }
 
   function undoLast() {
-    if (!state.lastAction) return;
-    resetPlayer(state.lastAction.id);
+    if (!state.actionHistory.length) return;
+    const last = state.actionHistory.pop();
+    resetPlayer(last.id, { fromUndo: true });
   }
 
   function countDrafted() {
@@ -490,7 +505,10 @@
   }
 
   function renderUndoButton() {
-    document.getElementById("undoBtn").disabled = !state.lastAction;
+    const btn = document.getElementById("undoBtn");
+    const n = state.actionHistory.length;
+    btn.disabled = n === 0;
+    btn.textContent = n > 0 ? `Undo last pick (${n})` : "Undo last pick";
   }
 
   function adpBadge(p) {
@@ -819,7 +837,7 @@
         p.slot = null;
       }
       state.slotAssignments = {};
-      state.lastAction = null;
+      state.actionHistory = [];
       persistAll();
       renderAll();
       toast("Draft reset.");
