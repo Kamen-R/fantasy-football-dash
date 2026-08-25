@@ -366,6 +366,12 @@ tbody tr.player-row.drafted-other .name-cell { text-decoration: line-through; }
   letter-spacing: 0.05em;
   color: var(--text-secondary);
 }
+.tier-divider .tier-method {
+  font-weight: 400;
+  text-transform: none;
+  letter-spacing: normal;
+  color: var(--text-muted);
+}
 
 .status-pill { font-size: 11px; padding: 2px 8px; border-radius: 999px; border: 1px solid var(--border); color: var(--text-secondary); }
 .status-pill.me { background: var(--accent); color: #fff; border-color: transparent; }
