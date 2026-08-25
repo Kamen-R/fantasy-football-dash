@@ -4,6 +4,8 @@
   const POS_LIST = ["QB", "RB", "WR", "TE", "K", "DST"];
   const SLOT_GROUPS = ["QB", "RB", "WR", "TE", "FLEX", "K", "DST", "BENCH"];
   const FLEX_ELIGIBLE = ["RB", "WR", "TE"];
+  const TOP_OFFENSE_CUTOFF = 10;
+  const BOTTOM_OFFENSE_CUTOFF = 27; // rank >= this is bottom 6 of 32
   const LS_KEYS = {
     csv: "ffdraft_csv_text",
     status: "ffdraft_status",
@@ -48,6 +50,7 @@
     injuryRiskQ1: null,
     injuryRiskQ3: null,
     tierMethodByPos: {},
+    offenseRankByTeam: {},
     ui: {
       search: "",
       posFilter: "ALL",
@@ -351,6 +354,33 @@
 
   // ---------- loading ----------
 
+  // Team offense strength (Rank,Team) is season-level reference data, not
+  // something that changes with a re-drafted player CSV, so it's fetched
+  // once at startup rather than tied into loadFromCsvText.
+  async function loadOffenseRankings() {
+    try {
+      const res = await fetch("offense_rankings.csv");
+      if (!res.ok) throw new Error("not found");
+      const text = await res.text();
+      const rows = parseCsv(text);
+      const header = rows[0].map((h) => h.trim().toLowerCase());
+      const rankIdx = header.indexOf("rank");
+      const teamIdx = header.indexOf("team");
+      if (rankIdx === -1 || teamIdx === -1) return;
+      const map = {};
+      for (const row of rows.slice(1)) {
+        const team = (row[teamIdx] || "").trim().toUpperCase();
+        const rank = parseInt(row[rankIdx], 10);
+        if (team && Number.isFinite(rank)) map[team] = rank;
+      }
+      state.offenseRankByTeam = map;
+      renderTable();
+      renderMyTeam();
+    } catch {
+      // Offense data is optional flavor, not core functionality — fail quiet.
+    }
+  }
+
   function loadFromCsvText(text, { resetDraft } = { resetDraft: false }) {
     const rows = parseCsv(text);
     if (!rows.length) {
@@ -622,6 +652,14 @@
     }
     if (p.volatility !== null && state.volatilityBands && p.volatility >= state.volatilityBands.high) {
       icons.push(`<span class="flag-icon" title="Highly volatile — expert ranks disagree widely on this player (σ=${p.volatility.toFixed(1)})">🎲</span>`);
+    }
+    const offenseRank = state.offenseRankByTeam[p.team];
+    if (offenseRank !== undefined) {
+      if (offenseRank <= TOP_OFFENSE_CUTOFF) {
+        icons.push(`<span class="flag-icon" title="${p.team} has a top-${TOP_OFFENSE_CUTOFF} offense (ranked #${offenseRank} of 32)">🔥</span>`);
+      } else if (offenseRank >= BOTTOM_OFFENSE_CUTOFF) {
+        icons.push(`<span class="flag-icon" title="${p.team} has a bottom-6 offense (ranked #${offenseRank} of 32)">🧊</span>`);
+      }
     }
     return icons.length ? `<span class="flag-icons">${icons.join("")}</span>` : "";
   }
@@ -897,6 +935,7 @@
   function init() {
     populateSettingsForm();
     renderPosTabs();
+    loadOffenseRankings();
 
     document.getElementById("csvInput").addEventListener("change", (e) => {
       const file = e.target.files[0];
