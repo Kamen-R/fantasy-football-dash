@@ -679,14 +679,17 @@
     // Tiers are computed on rank OR projected points depending on position,
     // but the table can be sorted by any column — so tier numbers don't
     // necessarily climb monotonically in display order (a lower-ranked player
-    // can have a better points tier). Track the deepest tier seen per position
-    // rather than just the last one, so re-encountering an earlier tier out of
-    // order never fires a duplicate/backward divider.
-    const maxTierSeenByPos = {};
+    // can have a better points tier, e.g. Puka Nacua sitting in a better tier
+    // than the higher-ranked Ja'Marr Chase). Track which tiers have already
+    // been shown per position (not just the running max) so every tier gets
+    // exactly one divider — never duplicated, and never silently skipped just
+    // because a later tier happened to be encountered first in this sort order.
+    const shownTiersByPos = {};
     for (const p of players) {
-      if (p.tier !== null && p.tier > (maxTierSeenByPos[p.pos] ?? 0)) {
+      const shown = shownTiersByPos[p.pos] ?? (shownTiersByPos[p.pos] = new Set());
+      if (p.tier !== null && !shown.has(p.tier)) {
         frag.appendChild(buildTierDividerRow(p));
-        maxTierSeenByPos[p.pos] = p.tier;
+        shown.add(p.tier);
       }
 
       const tr = document.createElement("tr");
