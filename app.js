@@ -12,6 +12,103 @@
   // here (e.g. an ESPN-league ADP file) to extend the picker; the dropdown in
   // Settings is built from this list.
   const ADP_SOURCES = [{ key: "underdog", label: "Underdog (Best Ball)", file: "adp_underdog.csv" }];
+
+  const ELITE_QB_CUTOFF = 5; // top-N QBs by overall rank count as "elite"
+  const ELITE_TE_CUTOFF = 3; // top-N TEs by overall rank count as "elite"
+
+  // Each strategy's `evaluate(myPicks)` runs fresh on every render against
+  // the player picked (in order) with status "me" — myPicks[0] is round 1,
+  // myPicks[1] is round 2, etc., which holds for a standard one-pick-per-round
+  // snake draft. Returns "achieved" (locked in), "eliminated" (no longer
+  // possible regardless of future picks), or "available" (still open).
+  // Elite-player strategies also go "eliminated" early if every qualifying
+  // player at that position is already off the board to someone else.
+  const STRATEGIES = [
+    {
+      id: "eliteTE",
+      label: "Elite TE",
+      description: `Getting a top-${ELITE_TE_CUTOFF} TE (by aggregate rank) in the first 3 rounds.`,
+      evaluate(myPicks) {
+        const firstThree = myPicks.slice(0, 3);
+        if (firstThree.some((p) => p.pos === "TE" && p.posRank <= ELITE_TE_CUTOFF)) return "achieved";
+        if (myPicks.length >= 3) return "eliminated";
+        const eliteTEs = state.players.filter((p) => p.pos === "TE" && p.posRank <= ELITE_TE_CUTOFF);
+        if (eliteTEs.length && !eliteTEs.some((p) => p.status === "available")) return "eliminated";
+        return "available";
+      },
+    },
+    {
+      id: "eliteQB",
+      label: "Elite QB",
+      description: `Drafting a top-${ELITE_QB_CUTOFF} QB (by aggregate rank), then at most 1 more QB the rest of the draft — 2 QBs total.`,
+      evaluate(myPicks) {
+        const myQBs = myPicks.filter((p) => p.pos === "QB");
+        if (myQBs.length > 2) return "eliminated";
+        if (myQBs.some((p) => p.posRank <= ELITE_QB_CUTOFF)) return "achieved";
+        const eliteQBs = state.players.filter((p) => p.pos === "QB" && p.posRank <= ELITE_QB_CUTOFF);
+        if (eliteQBs.length && !eliteQBs.some((p) => p.status === "available")) return "eliminated";
+        return "available";
+      },
+    },
+    {
+      id: "robustRB",
+      label: "Robust RB",
+      description: "Starting your draft with 3 RBs in the first 3 rounds, skipping an elite QB or TE early.",
+      evaluate(myPicks) {
+        const firstThree = myPicks.slice(0, Math.min(3, myPicks.length));
+        if (firstThree.some((p) => p.pos !== "RB")) return "eliminated";
+        return myPicks.length >= 3 ? "achieved" : "available";
+      },
+    },
+    {
+      id: "robustWR",
+      label: "Robust WR",
+      description: "Starting your draft with 3 WRs in the first 3 rounds, skipping an elite QB or TE early.",
+      evaluate(myPicks) {
+        const firstThree = myPicks.slice(0, Math.min(3, myPicks.length));
+        if (firstThree.some((p) => p.pos !== "WR")) return "eliminated";
+        return myPicks.length >= 3 ? "achieved" : "available";
+      },
+    },
+    {
+      id: "balanced",
+      label: "Balanced",
+      description: "Your first 8 picks having exactly 3 RBs and 4 or more WRs.",
+      evaluate(myPicks) {
+        const window = myPicks.slice(0, Math.min(8, myPicks.length));
+        const rbCount = window.filter((p) => p.pos === "RB").length;
+        const wrCount = window.filter((p) => p.pos === "WR").length;
+        if (rbCount > 3) return "eliminated";
+        if (myPicks.length >= 8) return rbCount === 3 && wrCount >= 4 ? "achieved" : "eliminated";
+        const remaining = 8 - myPicks.length;
+        const stillNeeded = Math.max(0, 3 - rbCount) + Math.max(0, 4 - wrCount);
+        if (stillNeeded > remaining) return "eliminated";
+        return "available";
+      },
+    },
+    {
+      id: "lateQbTe",
+      label: "Late QB/TE",
+      description: "Getting your first QB and your first TE after round 8.",
+      evaluate(myPicks) {
+        const window = myPicks.slice(0, Math.min(8, myPicks.length));
+        if (window.some((p) => p.pos === "QB" || p.pos === "TE")) return "eliminated";
+        return myPicks.length > 8 ? "achieved" : "available";
+      },
+    },
+    {
+      id: "doubleAnchorRB",
+      label: "Double Anchor RB",
+      description: "Your first two picks are RBs, then no RB3 until after round 6.",
+      evaluate(myPicks) {
+        if (myPicks.length >= 1 && myPicks[0].pos !== "RB") return "eliminated";
+        if (myPicks.length >= 2 && myPicks[1].pos !== "RB") return "eliminated";
+        const midWindow = myPicks.slice(2, Math.min(6, myPicks.length));
+        if (midWindow.some((p) => p.pos === "RB")) return "eliminated";
+        return myPicks.length > 6 ? "achieved" : "available";
+      },
+    },
+  ];
   const LS_KEYS = {
     csv: "ffdraft_csv_text",
     status: "ffdraft_status",
@@ -268,6 +365,7 @@
         extra,
         rankSources,
         volatility: null,
+        posRank: null,
         tier: null,
         status: "available",
         pick: null,
@@ -361,6 +459,15 @@
     const values = players.map((p) => p.injuryRisk).filter((v) => v !== null).sort((a, b) => a - b);
     state.injuryRiskQ1 = values.length ? percentile(values, 0.25) : null;
     state.injuryRiskQ3 = values.length ? percentile(values, 0.75) : null;
+  }
+
+  // Each player's 1-indexed rank within their own position (by overall rank),
+  // used to classify "elite" QBs/TEs for the draft strategy tracker.
+  function computePositionRanks(players) {
+    for (const pos of POS_LIST) {
+      const list = players.filter((p) => p.pos === pos).sort((a, b) => a.rank - b.rank);
+      list.forEach((p, i) => (p.posRank = i + 1));
+    }
   }
 
   function parseAdp(raw) {
@@ -499,6 +606,7 @@
     computeTiers(state.players);
     computeVolatility(state.players);
     computeInjuryRiskStats(state.players);
+    computePositionRanks(state.players);
 
     if (resetDraft) {
       localStorage.removeItem(LS_KEYS.status);
@@ -699,6 +807,7 @@
     renderQueue();
     renderClock();
     renderUndoButton();
+    renderStrategyTracker();
   }
 
   function renderUndoButton() {
@@ -896,6 +1005,24 @@
     el.innerHTML = POS_LIST.map((pos) => {
       const n = state.players.filter((p) => p.pos === pos && p.status === "available").length;
       return `<div class="pos-count-item"><span class="pos-dot ${pos}"></span>${pos} <span class="num">${n}</span></div>`;
+    }).join("");
+  }
+
+  const STATUS_ICON = { achieved: "✓", eliminated: "✕", available: "•" };
+
+  function renderStrategyTracker() {
+    const el = document.getElementById("strategyTracker");
+    const myPicks = state.players
+      .filter((p) => p.status === "me" && p.pick != null)
+      .sort((a, b) => a.pick - b.pick);
+
+    el.innerHTML = STRATEGIES.map((s) => {
+      const status = s.evaluate(myPicks);
+      return `
+        <div class="strategy-row ${status}" title="${escapeHtml(s.description)}">
+          <span class="strategy-icon">${STATUS_ICON[status]}</span>
+          <span class="strategy-label">${escapeHtml(s.label)}</span>
+        </div>`;
     }).join("");
   }
 
