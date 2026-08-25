@@ -19,12 +19,24 @@
     tierSensitivity: "medium",
   };
 
-  // Multipliers picked by sweeping against the sample rankings file: 1.0 was
-  // over-segmenting deep positions (23+ RB tiers), 1.75 lands close to what a
-  // real draft board shows (~6-12 tiers per position).
-  const TIER_SENSITIVITY = { tight: 1.0, medium: 1.75, loose: 2.5 };
+  // Two independent multiplier sets, because points gaps and rank gaps are
+  // shaped nothing alike: rank gaps are roughly uniform small integers, while
+  // points gaps are steep at the top of a position (a couple of true outliers)
+  // and flat for most of the pool. Both were picked by sweeping against real
+  // sample data until tier counts looked like a usable draft board (~4-16
+  // tiers per position) rather than 1 giant tier or 30 singleton ones.
+  const TIER_SENSITIVITY = {
+    rank: { tight: 1.0, medium: 1.75, loose: 2.5 },
+    projection: { tight: 0.25, medium: 0.5, loose: 1.25 },
+  };
 
-  /** @type {{players: any[], byId: Map<string,any>, settings: any, queue: Set<string>, slotAssignments: Record<string,string>, actionHistory: {id:string}[], ui: any}} */
+  // A position needs at least this many players with a projection value
+  // before points-based tiering is trusted for it; below that (e.g. DST,
+  // which regularly ships with zero point projections) tiering falls back
+  // to the rank-gap method instead.
+  const MIN_PROJECTION_SAMPLE = 10;
+
+  /** @type {{players: any[], byId: Map<string,any>, settings: any, queue: Set<string>, slotAssignments: Record<string,string>, actionHistory: {id:string}[], tierMethodByPos: Record<string,string>, ui: any}} */
   const state = {
     players: [],
     byId: new Map(),
@@ -33,6 +45,7 @@
     slotAssignments: {},
     actionHistory: [],
     volatilityBands: null,
+    tierMethodByPos: {},
     ui: {
       search: "",
       posFilter: "ALL",
@@ -156,6 +169,17 @@
     const notesIdx = find([/^notes?$/]);
     const rankIdx = find([/^agg_?rank$/, /^overall_?rank$/, /^rank$/, /^ecr$/, /rank/]);
 
+    // The points-projection column used for tiers. Priority 1: a "DS
+    // Projection"-style column (this year's named source) — the "ds" check
+    // keeps it from colliding with DS_Rank, which has no "proj" in it.
+    // Priority 2: any other central projection/points column for CSVs that
+    // don't use "DS" naming, explicitly excluding Floor/Ceiling projection
+    // columns since those are variance bounds, not the point estimate to tier on.
+    let projIdx = lower.findIndex((h) => h.includes("ds") && h.includes("proj"));
+    if (projIdx === -1) {
+      projIdx = lower.findIndex((h) => (h.includes("proj") || h.includes("pts") || h.includes("points")) && !h.includes("floor") && !h.includes("ceil"));
+    }
+
     const used = new Set([nameIdx, posIdx, teamIdx, byeIdx, sosIdx, adpIdx, notesIdx, rankIdx].filter((i) => i !== -1));
     const extra = [];
     norm.forEach((h, idx) => {
@@ -164,7 +188,7 @@
       extra.push({ idx, label: h });
     });
 
-    return { nameIdx, posIdx, teamIdx, byeIdx, sosIdx, adpIdx, notesIdx, rankIdx, extra };
+    return { nameIdx, posIdx, teamIdx, byeIdx, sosIdx, adpIdx, notesIdx, rankIdx, projIdx, extra };
   }
 
   function buildPlayers(rows) {
@@ -185,6 +209,8 @@
       const notes = cols.notesIdx !== -1 ? row[cols.notesIdx] : "";
       const rankRaw = cols.rankIdx !== -1 ? row[cols.rankIdx] : String(r);
       const rank = parseFloat(rankRaw);
+      const projRaw = cols.projIdx !== -1 ? row[cols.projIdx] : "";
+      const projection = parseFloat(projRaw);
 
       const extra = cols.extra
         .map(({ idx, label }) => ({ label, value: row[idx] }))
@@ -218,6 +244,7 @@
         sos: sos ? String(sos).trim() : "",
         adp: parseAdp(adpRaw),
         notes: (notes || "").trim(),
+        projection: Number.isFinite(projection) ? projection : null,
         extra,
         rankSources,
         volatility: null,
@@ -233,26 +260,49 @@
 
   // ---------- tiers & volatility ----------
 
+  // Assigns ascending tier numbers to `list` in place, breaking to a new tier
+  // wherever the gap between consecutive `valueFn` results is a statistical
+  // outlier relative to that list's own gaps (mean + mult*stddev). Shared by
+  // both the points-based and rank-based tiering paths below — same
+  // procedure, different input value and multiplier scale.
+  function tierByGap(list, valueFn, mult) {
+    list.sort((a, b) => valueFn(a) - valueFn(b));
+    list[0].tier = 1;
+    if (list.length === 1) return;
+
+    const gaps = [];
+    for (let i = 1; i < list.length; i++) gaps.push(valueFn(list[i]) - valueFn(list[i - 1]));
+    const meanGap = gaps.reduce((a, b) => a + b, 0) / gaps.length;
+    const variance = gaps.reduce((a, b) => a + (b - meanGap) ** 2, 0) / gaps.length;
+    const stdGap = Math.sqrt(variance);
+    const threshold = meanGap + mult * stdGap;
+
+    let tier = 1;
+    for (let i = 1; i < list.length; i++) {
+      if (gaps[i - 1] > threshold && gaps[i - 1] > 0) tier++;
+      list[i].tier = tier;
+    }
+  }
+
   function computeTiers(players) {
-    const mult = TIER_SENSITIVITY[state.settings.tierSensitivity] ?? TIER_SENSITIVITY.medium;
+    const rankMult = TIER_SENSITIVITY.rank[state.settings.tierSensitivity] ?? TIER_SENSITIVITY.rank.medium;
+    const projMult = TIER_SENSITIVITY.projection[state.settings.tierSensitivity] ?? TIER_SENSITIVITY.projection.medium;
     for (const p of players) p.tier = null;
+    state.tierMethodByPos = {};
+
     for (const pos of POS_LIST) {
-      const list = players.filter((p) => p.pos === pos).sort((a, b) => a.rank - b.rank);
-      if (!list.length) continue;
-      list[0].tier = 1;
-      if (list.length === 1) continue;
+      const posPlayers = players.filter((p) => p.pos === pos);
+      if (!posPlayers.length) continue;
 
-      const gaps = [];
-      for (let i = 1; i < list.length; i++) gaps.push(list[i].rank - list[i - 1].rank);
-      const meanGap = gaps.reduce((a, b) => a + b, 0) / gaps.length;
-      const variance = gaps.reduce((a, b) => a + (b - meanGap) ** 2, 0) / gaps.length;
-      const stdGap = Math.sqrt(variance);
-      const threshold = meanGap + mult * stdGap;
-
-      let tier = 1;
-      for (let i = 1; i < list.length; i++) {
-        if (gaps[i - 1] > threshold && gaps[i - 1] > 0) tier++;
-        list[i].tier = tier;
+      const withProjection = posPlayers.filter((p) => p.projection !== null);
+      if (withProjection.length >= MIN_PROJECTION_SAMPLE) {
+        // Higher points is better, so sort/gap on the negated value to reuse
+        // the same ascending-gap logic as the rank path.
+        tierByGap(withProjection, (p) => -p.projection, projMult);
+        state.tierMethodByPos[pos] = "projection";
+      } else {
+        tierByGap(posPlayers, (p) => p.rank, rankMult);
+        state.tierMethodByPos[pos] = "rank";
       }
     }
   }
@@ -520,7 +570,9 @@
 
   function tierBadge(p) {
     if (!p.tier) return `<span class="tier-chip neutral">—</span>`;
-    return `<span class="tier-chip">T${p.tier}</span>`;
+    const method = state.tierMethodByPos[p.pos];
+    const title = method === "projection" ? "Tiered by projected points" : "Tiered by rank (not enough projection data for this position)";
+    return `<span class="tier-chip" title="${title}">T${p.tier}</span>`;
   }
 
   function volatilityBadge(p) {
@@ -553,12 +605,18 @@
     }
 
     const frag = document.createDocumentFragment();
-    const lastTierByPos = {};
+    // Tiers are computed on rank OR projected points depending on position,
+    // but the table can be sorted by any column — so tier numbers don't
+    // necessarily climb monotonically in display order (a lower-ranked player
+    // can have a better points tier). Track the deepest tier seen per position
+    // rather than just the last one, so re-encountering an earlier tier out of
+    // order never fires a duplicate/backward divider.
+    const maxTierSeenByPos = {};
     for (const p of players) {
-      if (p.tier !== null && lastTierByPos[p.pos] !== undefined && lastTierByPos[p.pos] !== p.tier) {
+      if (p.tier !== null && p.tier > (maxTierSeenByPos[p.pos] ?? 0)) {
         frag.appendChild(buildTierDividerRow(p));
+        maxTierSeenByPos[p.pos] = p.tier;
       }
-      if (p.tier !== null) lastTierByPos[p.pos] = p.tier;
 
       const tr = document.createElement("tr");
       tr.className = "player-row" + (p.status === "me" ? " drafted-me" : p.status === "other" ? " drafted-other" : "");
@@ -594,7 +652,8 @@
   function buildTierDividerRow(p) {
     const tr = document.createElement("tr");
     tr.className = "tier-divider-row";
-    tr.innerHTML = `<td colspan="11"><span class="tier-divider"><span class="pos-dot ${p.pos}"></span>${p.pos} · Tier ${p.tier}</span></td>`;
+    const method = state.tierMethodByPos[p.pos] === "projection" ? "by points" : "by rank";
+    tr.innerHTML = `<td colspan="11"><span class="tier-divider"><span class="pos-dot ${p.pos}"></span>${p.pos} · Tier ${p.tier} <span class="tier-method">${method}</span></span></td>`;
     return tr;
   }
 
