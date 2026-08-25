@@ -45,6 +45,7 @@
     slotAssignments: {},
     actionHistory: [],
     volatilityBands: null,
+    injuryRiskQ1: null,
     injuryRiskQ3: null,
     tierMethodByPos: {},
     ui: {
@@ -332,11 +333,12 @@
     state.volatilityBands = values.length ? { low: percentile(values, 0.33), high: percentile(values, 0.67) } : null;
   }
 
-  // Flags the riskiest quarter of the pool: players whose reported injury
-  // risk is at or above the 75th percentile (i.e. the bottom quartile by
-  // health outlook, even though that's the top quartile of the raw percentage).
+  // Bottom quartile (Q1, lowest reported risk %) and top quartile (Q3,
+  // highest) of the Injury Risk column, used to flag the safest and riskiest
+  // quarters of the pool.
   function computeInjuryRiskStats(players) {
     const values = players.map((p) => p.injuryRisk).filter((v) => v !== null).sort((a, b) => a - b);
+    state.injuryRiskQ1 = values.length ? percentile(values, 0.25) : null;
     state.injuryRiskQ3 = values.length ? percentile(values, 0.75) : null;
   }
 
@@ -612,6 +614,9 @@
   // to scan over to the dedicated Volatility column or expand row detail.
   function flagIcons(p) {
     const icons = [];
+    if (p.injuryRisk !== null && state.injuryRiskQ1 !== null && p.injuryRisk <= state.injuryRiskQ1) {
+      icons.push(`<span class="flag-icon" title="Low injury risk — reported at ${p.injuryRisk}%, in the safest quartile of rated players">🛡️</span>`);
+    }
     if (p.injuryRisk !== null && state.injuryRiskQ3 !== null && p.injuryRisk >= state.injuryRiskQ3) {
       icons.push(`<span class="flag-icon" title="High injury risk — reported at ${p.injuryRisk}%, in the riskiest quartile of rated players">🚑</span>`);
     }
