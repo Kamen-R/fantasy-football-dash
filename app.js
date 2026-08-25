@@ -502,7 +502,13 @@
       renderTable();
       renderMyTeam();
     } catch {
-      // Offense data is optional flavor, not core functionality — fail quiet.
+      // Most common cause: index.html was opened directly (file://) instead
+      // of served over http, which blocks this fetch — same constraint as
+      // "Load sample". Missing offense data isn't fatal (the rest of the app
+      // still works), but failing without any visible signal makes the
+      // resulting missing 🔥/🧊 icons impossible to diagnose from the UI, so
+      // surface it instead of swallowing it.
+      toast("Couldn't load offense rankings — serve this folder over http (see README) to see 🔥/🧊 icons.");
     }
   }
 
@@ -555,8 +561,10 @@
       renderTable();
       renderMyTeam();
     } catch {
-      // ADP overlay is optional — fail quiet, badges fall back to the CSV's
-      // own column (if any).
+      // Same file:// constraint as loadOffenseRankings — surface it rather
+      // than silently falling back to the CSV's own ADP column with no
+      // indication why the matched-source badges never show up.
+      toast(`Couldn't load ${source.label} ADP — serve this folder over http (see README) to see it.`);
     }
   }
 
