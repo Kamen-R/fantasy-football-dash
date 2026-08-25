@@ -4,6 +4,8 @@
   const POS_LIST = ["QB", "RB", "WR", "TE", "K", "DST"];
   const SLOT_GROUPS = ["QB", "RB", "WR", "TE", "FLEX", "K", "DST", "BENCH"];
   const FLEX_ELIGIBLE = ["RB", "WR", "TE"];
+  const TOP_OFFENSE_CUTOFF = 10;
+  const BOTTOM_OFFENSE_CUTOFF = 27; // rank >= this is bottom 6 of 32
   const LS_KEYS = {
     csv: "ffdraft_csv_text",
     status: "ffdraft_status",
@@ -45,7 +47,10 @@
     slotAssignments: {},
     actionHistory: [],
     volatilityBands: null,
+    injuryRiskQ1: null,
+    injuryRiskQ3: null,
     tierMethodByPos: {},
+    offenseRankByTeam: {},
     ui: {
       search: "",
       posFilter: "ALL",
@@ -168,6 +173,7 @@
     const adpIdx = find([/adp/]);
     const notesIdx = find([/^notes?$/]);
     const rankIdx = find([/^agg_?rank$/, /^overall_?rank$/, /^rank$/, /^ecr$/, /rank/]);
+    const injuryIdx = find([/injury/]);
 
     // The points-projection column used for tiers. Priority 1: a "DS
     // Projection"-style column (this year's named source) — the "ds" check
@@ -188,7 +194,7 @@
       extra.push({ idx, label: h });
     });
 
-    return { nameIdx, posIdx, teamIdx, byeIdx, sosIdx, adpIdx, notesIdx, rankIdx, projIdx, extra };
+    return { nameIdx, posIdx, teamIdx, byeIdx, sosIdx, adpIdx, notesIdx, rankIdx, projIdx, injuryIdx, extra };
   }
 
   function buildPlayers(rows) {
@@ -211,6 +217,8 @@
       const rank = parseFloat(rankRaw);
       const projRaw = cols.projIdx !== -1 ? row[cols.projIdx] : "";
       const projection = parseFloat(projRaw);
+      const injuryRaw = cols.injuryIdx !== -1 ? row[cols.injuryIdx] : "";
+      const injuryRisk = parseFloat(String(injuryRaw).replace("%", ""));
 
       const extra = cols.extra
         .map(({ idx, label }) => ({ label, value: row[idx] }))
@@ -245,6 +253,7 @@
         adp: parseAdp(adpRaw),
         notes: (notes || "").trim(),
         projection: Number.isFinite(projection) ? projection : null,
+        injuryRisk: Number.isFinite(injuryRisk) ? injuryRisk : null,
         extra,
         rankSources,
         volatility: null,
@@ -327,6 +336,15 @@
     state.volatilityBands = values.length ? { low: percentile(values, 0.33), high: percentile(values, 0.67) } : null;
   }
 
+  // Bottom quartile (Q1, lowest reported risk %) and top quartile (Q3,
+  // highest) of the Injury Risk column, used to flag the safest and riskiest
+  // quarters of the pool.
+  function computeInjuryRiskStats(players) {
+    const values = players.map((p) => p.injuryRisk).filter((v) => v !== null).sort((a, b) => a - b);
+    state.injuryRiskQ1 = values.length ? percentile(values, 0.25) : null;
+    state.injuryRiskQ3 = values.length ? percentile(values, 0.75) : null;
+  }
+
   function parseAdp(raw) {
     if (raw === undefined || raw === null || raw === "") return null;
     const cleaned = String(raw).replace(/\+/g, "");
@@ -335,6 +353,33 @@
   }
 
   // ---------- loading ----------
+
+  // Team offense strength (Rank,Team) is season-level reference data, not
+  // something that changes with a re-drafted player CSV, so it's fetched
+  // once at startup rather than tied into loadFromCsvText.
+  async function loadOffenseRankings() {
+    try {
+      const res = await fetch("offense_rankings.csv");
+      if (!res.ok) throw new Error("not found");
+      const text = await res.text();
+      const rows = parseCsv(text);
+      const header = rows[0].map((h) => h.trim().toLowerCase());
+      const rankIdx = header.indexOf("rank");
+      const teamIdx = header.indexOf("team");
+      if (rankIdx === -1 || teamIdx === -1) return;
+      const map = {};
+      for (const row of rows.slice(1)) {
+        const team = (row[teamIdx] || "").trim().toUpperCase();
+        const rank = parseInt(row[rankIdx], 10);
+        if (team && Number.isFinite(rank)) map[team] = rank;
+      }
+      state.offenseRankByTeam = map;
+      renderTable();
+      renderMyTeam();
+    } catch {
+      // Offense data is optional flavor, not core functionality — fail quiet.
+    }
+  }
 
   function loadFromCsvText(text, { resetDraft } = { resetDraft: false }) {
     const rows = parseCsv(text);
@@ -354,6 +399,7 @@
     state.actionHistory = [];
     computeTiers(state.players);
     computeVolatility(state.players);
+    computeInjuryRiskStats(state.players);
 
     if (resetDraft) {
       localStorage.removeItem(LS_KEYS.status);
@@ -593,6 +639,31 @@
     return `<span class="volatility-badge ${cls}" title="Spread across ${p.rankSources.length} sources (${sourceText})">${label} · ${p.volatility.toFixed(1)}</span>`;
   }
 
+  // Compact at-a-glance warning icons shown next to a player's name — in the
+  // main table and in the My Team roster — so risk is visible without having
+  // to scan over to the dedicated Volatility column or expand row detail.
+  function flagIcons(p) {
+    const icons = [];
+    if (p.injuryRisk !== null && state.injuryRiskQ1 !== null && p.injuryRisk <= state.injuryRiskQ1) {
+      icons.push(`<span class="flag-icon" title="Low injury risk — reported at ${p.injuryRisk}%, in the safest quartile of rated players">🛡️</span>`);
+    }
+    if (p.injuryRisk !== null && state.injuryRiskQ3 !== null && p.injuryRisk >= state.injuryRiskQ3) {
+      icons.push(`<span class="flag-icon" title="High injury risk — reported at ${p.injuryRisk}%, in the riskiest quartile of rated players">🚑</span>`);
+    }
+    if (p.volatility !== null && state.volatilityBands && p.volatility >= state.volatilityBands.high) {
+      icons.push(`<span class="flag-icon" title="Highly volatile — expert ranks disagree widely on this player (σ=${p.volatility.toFixed(1)})">🎲</span>`);
+    }
+    const offenseRank = state.offenseRankByTeam[p.team];
+    if (offenseRank !== undefined) {
+      if (offenseRank <= TOP_OFFENSE_CUTOFF) {
+        icons.push(`<span class="flag-icon" title="${p.team} has a top-${TOP_OFFENSE_CUTOFF} offense (ranked #${offenseRank} of 32)">🔥</span>`);
+      } else if (offenseRank >= BOTTOM_OFFENSE_CUTOFF) {
+        icons.push(`<span class="flag-icon" title="${p.team} has a bottom-6 offense (ranked #${offenseRank} of 32)">🧊</span>`);
+      }
+    }
+    return icons.length ? `<span class="flag-icons">${icons.join("")}</span>` : "";
+  }
+
   function renderTable() {
     const tbody = document.getElementById("playersBody");
     const players = filteredSortedPlayers();
@@ -626,10 +697,10 @@
       const isAvailable = p.status === "available";
 
       tr.innerHTML = `
-        <td><button class="star-btn ${starred ? "active" : ""}" data-action="star" title="Queue">${starred ? "★" : "☆"}</button></td>
+        <td><button class="star-btn ${starred ? "active" : ""}" data-action="star" title="${starred ? "Remove from your queue" : "Add to your queue"}">${starred ? "★" : "☆"}</button></td>
         <td>${Number.isFinite(p.rank) ? p.rank : ""}</td>
         <td>${tierBadge(p)}</td>
-        <td class="name-cell">${escapeHtml(p.name)}</td>
+        <td class="name-cell">${escapeHtml(p.name)}${flagIcons(p)}</td>
         <td><span class="pos-badge"><span class="pos-dot ${p.pos}"></span>${p.pos}</span></td>
         <td>${p.team}</td>
         <td>${p.bye || "—"}</td>
@@ -728,8 +799,8 @@
         return `
           <div class="roster-slot filled">
             <span class="slot-tag">${slot.type}</span>
-            <span class="slot-player">${escapeHtml(player.name)} <span class="name-sub">${player.pos}${player.team !== "—" ? " · " + player.team : ""}</span></span>
-            <button class="slot-remove" data-unassign="${slot.id}" title="Unassign">×</button>
+            <span class="slot-player">${escapeHtml(player.name)}${flagIcons(player)} <span class="name-sub">${player.pos}${player.team !== "—" ? " · " + player.team : ""}</span></span>
+            <button class="slot-remove" data-unassign="${slot.id}" title="Unassign from this roster slot">×</button>
           </div>`;
       }
       return `
@@ -750,7 +821,7 @@
         rows.push(`
           <div class="roster-slot filled">
             <span class="slot-tag">${p.pos}</span>
-            <span class="slot-player">${escapeHtml(p.name)}</span>
+            <span class="slot-player">${escapeHtml(p.name)}${flagIcons(p)}</span>
             <select data-manual-assign="${p.id}"><option value="">assign…</option>${options}</select>
           </div>`);
       }
@@ -772,7 +843,7 @@
           <span class="pos-dot ${p.pos}"></span>
           <span class="qname">${escapeHtml(p.name)}</span>
           <span class="name-sub">#${p.rank}</span>
-          <button class="qremove" data-unqueue="${p.id}" title="Remove">×</button>
+          <button class="qremove" data-unqueue="${p.id}" title="Remove from queue">×</button>
         </div>`;
       })
       .join("");
@@ -864,6 +935,7 @@
   function init() {
     populateSettingsForm();
     renderPosTabs();
+    loadOffenseRankings();
 
     document.getElementById("csvInput").addEventListener("change", (e) => {
       const file = e.target.files[0];

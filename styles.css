@@ -328,6 +328,9 @@ tbody tr.player-row.drafted-other .name-cell { text-decoration: line-through; }
 .name-cell { font-weight: 600; }
 .name-sub { color: var(--text-muted); font-weight: 400; font-size: 11px; }
 
+.flag-icons { margin-left: 4px; white-space: nowrap; }
+.flag-icon { font-size: 12px; cursor: help; margin-right: 1px; }
+
 .pos-badge { display: inline-flex; align-items: center; gap: 5px; font-weight: 600; font-size: 12px; }
 
 .star-btn {
