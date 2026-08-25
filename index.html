@@ -68,6 +68,9 @@
             <option value="loose">Loose (fewer tiers)</option>
           </select>
         </label>
+        <label>ADP source
+          <select id="cfgAdpSource"></select>
+        </label>
         <p class="hint">Roster slots</p>
         <div class="field-grid" id="rosterCfg">
           <label>QB <input type="number" min="0" max="4" value="1" data-slot="QB" /></label>
@@ -115,7 +118,7 @@
             <th data-sort="pos" class="sortable">Pos</th>
             <th data-sort="team" class="sortable">Team</th>
             <th data-sort="bye" class="sortable">Bye</th>
-            <th data-sort="adp" class="sortable" title="How this player's rank compares to Average Draft Position. Negative (value) means they're ranked ahead of where they're typically drafted — may fall to you later than expected. Positive (reach) means the opposite — drafted earlier than their rank suggests.">vs ADP</th>
+            <th data-sort="adp" class="sortable" title="How this player's rank compares to Average Draft Position. Computed from your own rank against the ADP source picked in League settings, when this player can be matched by name — falls back to this file's own ADP column otherwise. Negative (value) means they're ranked ahead of where they're typically drafted — may fall to you later than expected. Positive (reach) means the opposite — drafted earlier than their rank suggests.">vs ADP</th>
             <th data-sort="volatility" class="sortable" title="How much the expert sources in this file disagree on this player's rank (standard deviation across sources). Steady means wide agreement; Volatile means the sources are spread far apart — higher bust/breakout uncertainty.">Volatility</th>
             <th>Status</th>
             <th></th>
